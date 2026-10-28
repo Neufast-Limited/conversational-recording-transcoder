@@ -1,0 +1,22 @@
+services:
+  conversational-recording-transcoder:
+    build: .
+    image: conversational-recording-transcoder:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AWS_SHARED_CREDENTIALS_FILE: /home/app/.aws/credentials
+      AWS_CONFIG_FILE: /home/app/.aws/config
+      HOME: /home/app
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cpus: 2
+    mem_limit: 1g
+    volumes:
+      - ${HOME}/.aws:/home/app/.aws:ro
