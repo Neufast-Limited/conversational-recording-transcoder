@@ -7,9 +7,9 @@ from unittest.mock import patch
 import boto3
 from botocore.stub import Stubber
 
-from conversational_recording_transcoder.config import Settings
-from conversational_recording_transcoder.main import main
-from conversational_recording_transcoder.repositories.s3_repository import S3Repository
+from app.config import Settings
+from app.main import main
+from app.repositories.s3_repository import S3Repository
 
 
 class S3RepositoryTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class S3RepositoryTests(unittest.TestCase):
                               aws_access_key_id="testing", aws_secret_access_key="testing")
         # No responses are registered: any S3 operation fails this test.
         with Stubber(client), patch(
-            "conversational_recording_transcoder.main.boto3.client", return_value=client
+            "app.main.boto3.client", return_value=client
         ), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(), 0)
 

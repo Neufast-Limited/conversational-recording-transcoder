@@ -5,7 +5,7 @@ Minimal Python starter: FFmpeg is installed in Docker and an AWS S3 client is in
 ## Structure
 
 ```text
-src/conversational_recording_transcoder/
+src/app/
   config.py                      # Environment configuration
   main.py                        # Entrypoint; wires dependencies
   repositories/

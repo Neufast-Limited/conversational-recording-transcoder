@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 USER app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/src
-ENTRYPOINT ["python", "-m", "conversational_recording_transcoder.main"]
+ENTRYPOINT ["python", "-m", "app.main"]
