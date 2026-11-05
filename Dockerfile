@@ -11,4 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 USER app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/src
-ENTRYPOINT ["python", "-m", "app.main"]
+ENTRYPOINT ["python", "-m", "awslambdaric"]
+CMD ["app.handler.lambda_handler"]

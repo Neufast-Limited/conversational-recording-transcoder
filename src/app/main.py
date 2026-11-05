@@ -2,9 +2,9 @@ import json
 import sys
 
 import boto3
-from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .clients import build_client_config
 from .config import Settings
 from .repositories.s3_repository import S3Repository
 from .repositories.storage_repository import StorageRepository
@@ -16,11 +16,7 @@ def main() -> int:
         client = boto3.client(
             "s3",
             region_name=settings.region,
-            config=Config(
-                connect_timeout=5,
-                read_timeout=10,
-                retries={"mode": "standard", "total_max_attempts": 2},
-            ),
+            config=build_client_config(settings),
         )
         storage: StorageRepository = S3Repository(client)
     except (ValueError, BotoCoreError, ClientError) as error:
