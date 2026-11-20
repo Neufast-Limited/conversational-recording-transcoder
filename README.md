@@ -66,6 +66,35 @@ Alternatively, supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional
 
 The local startup check creates the configured S3 client, injects it into `S3Repository`, and prints `status: initialized`. AWS credentials follow the SDK's standard credential chain. It makes no S3 requests and does not verify permissions.
 
+## Push an image to ECR
+
+From the project directory, run:
+
+```bash
+./scripts/push_to_ecr.sh
+# Optional version tag and AWS profile:
+AWS_PROFILE=your-profile ./scripts/push_to_ecr.sh v1
+```
+
+The script builds and pushes to
+`826961393531.dkr.ecr.ap-southeast-1.amazonaws.com/conversational-media-transcoder:latest`
+by default. It checks the AWS account and that the repository exists before building.
+Every run pulls the base image and rebuilds with `--no-cache`, so unchanged source
+does not simply reuse the previous build. After publishing, it prints the digest
+and push timestamp reported by ECR.
+It uses a single `linux/amd64` platform, the Docker exporter, and disables provenance
+and SBOM attestations. It explicitly uses `docker push --platform` to publish only
+the selected platform's image manifest, excluding an image index. This requires
+Docker API 1.46 or newer. After pushing, it checks that ECR reports a Docker v2 image
+manifest (`application/vnd.docker.distribution.manifest.v2+json`), rather than an
+image index. The script exits with an error if verification fails.
+
+For an ARM Lambda, use `TARGET_PLATFORM=linux/arm64`. The image architecture must
+match the Lambda function. Other overrides are `AWS_REGION`, `AWS_ACCOUNT_ID`, and
+`ECR_REPOSITORY`; see `./scripts/push_to_ecr.sh --help`. AWS credentials follow the
+CLI's normal credential chain. The script publishes the image only; updating the
+Lambda function is a separate step.
+
 ## Verify FFmpeg
 
 ```bash
