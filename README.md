@@ -103,6 +103,9 @@ docker compose run --rm --entrypoint ffmpeg conversational-recording-transcoder 
 
 ## Tests
 
+For Grafana k6 tests of up to 100 concurrent one-hour recordings on the existing
+Lambda, see [performance-tests/K6.md](performance-tests/K6.md).
+
 ```bash
 docker compose run --rm --entrypoint python \
   -v "$PWD/tests:/app/tests:ro" conversational-recording-transcoder -m unittest discover -s tests -v

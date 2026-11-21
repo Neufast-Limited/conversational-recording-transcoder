@@ -1,0 +1,38 @@
+{
+  "staged": true,
+  "region": "ap-southeast-1",
+  "bucket": "voicebot-testing",
+  "stack": "transcoder-perf-20",
+  "run_id": "offline",
+  "ids": [
+    "perf_tc_offline_001",
+    "perf_tc_offline_002",
+    "perf_tc_offline_003",
+    "perf_tc_offline_004",
+    "perf_tc_offline_005",
+    "perf_tc_offline_006",
+    "perf_tc_offline_007",
+    "perf_tc_offline_008",
+    "perf_tc_offline_009",
+    "perf_tc_offline_010",
+    "perf_tc_offline_011",
+    "perf_tc_offline_012",
+    "perf_tc_offline_013",
+    "perf_tc_offline_014",
+    "perf_tc_offline_015",
+    "perf_tc_offline_016",
+    "perf_tc_offline_017",
+    "perf_tc_offline_018",
+    "perf_tc_offline_019",
+    "perf_tc_offline_020"
+  ],
+  "outputs": {
+    "FunctionName": "transcoder-perf-20",
+    "QueueUrl": "https://sqs.ap-southeast-1.amazonaws.com/123456789012/transcoder-perf-20-input.fifo",
+    "ScoringSinkUrl": "https://sqs.ap-southeast-1.amazonaws.com/123456789012/transcoder-perf-20-scoring-sink.fifo",
+    "TriggerUUID": "offline"
+  },
+  "fixture": {
+    "duration_seconds": 3600
+  }
+}
