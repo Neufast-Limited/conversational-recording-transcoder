@@ -181,10 +181,23 @@ def stage(args):
     if args.state.exists():
         raise ValueError("State file exists; choose a new --state path to preserve the earlier run")
     direct = bool(args.existing_function)
+    queue_url = getattr(args, "queue_url", None)
+    if queue_url and not direct:
+        raise ValueError("--queue-url requires --existing-function")
     if not direct and args.count > 20:
         raise ValueError("The isolated stack is capped at 20; use --existing-function for the 100-way direct test")
     outputs = {"FunctionName": args.existing_function} if direct else stack_outputs(args)
     cfg = client("lambda", args.region).get_function_configuration(FunctionName=outputs["FunctionName"])
+    expected_peak = args.count
+    if queue_url:
+        queue_arn = client("sqs", args.region).get_queue_attributes(
+            QueueUrl=queue_url, AttributeNames=["QueueArn"])["Attributes"]["QueueArn"]
+        matches = [mapping for mapping in client("lambda", args.region).list_event_source_mappings(
+            FunctionName=outputs["FunctionName"])["EventSourceMappings"] if mapping["EventSourceArn"] == queue_arn]
+        if len(matches) != 1 or matches[0]["BatchSize"] != 1 or matches[0].get("FunctionResponseTypes"):
+            raise ValueError("Encoding-only SQS tests require one existing batch-size-1 trigger with partial failure reporting disabled")
+        outputs.update(QueueUrl=queue_url, TriggerUUID=matches[0]["UUID"])
+        expected_peak = min(args.count, matches[0].get("ScalingConfig", {}).get("MaximumConcurrency", args.count))
     for key in ("AWS_BUCKET_NAME", "CVI_RECORDING_BUCKET_NAME"):
         if cfg["Environment"]["Variables"][key] != args.bucket:
             raise ValueError("Staging bucket differs from the test function's configured buckets")
@@ -198,7 +211,8 @@ def stage(args):
         raise ValueError("Run prefix already exists; use a new run ID")
     ids = [f"{root}{i:03d}" for i in range(1, args.count + 1)]
     state = {"region": args.region, "bucket": args.bucket, "stack": args.stack, "outputs": outputs,
-             "mode": "direct-existing" if direct else "isolated-sqs",
+             "mode": "sqs-existing" if queue_url else "direct-existing" if direct else "isolated-sqs",
+             "expected_peak": expected_peak,
              "run_id": run_id, "ids": ids, "fixture": fixture_meta, "staged": False}
     save(args.state, state)
     fixture_prefix = f"{root}fixture/"
@@ -312,7 +326,7 @@ def report(args):
     state = read(args.state)
     if not state.get("submitted_at"):
         raise ValueError("Run has not been submitted")
-    if state.get("mode") == "direct-existing":
+    if state.get("mode") in ("direct-existing", "sqs-existing"):
         return report_direct(args, state)
     region, bucket = state["region"], state["bucket"]
     s3, sqs = client("s3", region), client("sqs", region)
@@ -376,7 +390,7 @@ def report(args):
     print(f"Completed: {sum(x['done'] for x in checks)}/{len(checks)}; report: {args.output}")
 
 
-def attribute_test_invocations(events, interview_ids, run_id):
+def attribute_test_invocations(events, interview_ids, run_id, message_ids=None):
     """Match IDs or the explicitly assigned SQS message IDs, including split tracebacks."""
     active_by_stream, own_requests = {}, set()
     per_interview = {interview_id: set() for interview_id in interview_ids}
@@ -387,6 +401,18 @@ def attribute_test_invocations(events, interview_ids, run_id):
         if beginning:
             active_by_stream[stream] = beginning.group(1)
         request_id = active_by_stream.get(stream)
+        if message_ids:
+            # Warm streams contain successive invocations. Associate only the
+            # explicit message-ID error, not delayed traceback lines from an old job.
+            sqs_message = re.search(r"Failed to process message ([A-Za-z0-9_-]+)", message)
+            if sqs_message and sqs_message.group(1) in message_ids:
+                explicit_request = re.search(r"\t([0-9a-fA-F-]{36})\tFailed to process message", message)
+                attributed_request = explicit_request.group(1) if explicit_request else request_id
+                if attributed_request:
+                    interview_id = message_ids[sqs_message.group(1)]
+                    own_requests.add(attributed_request)
+                    per_interview[interview_id].add(attributed_request)
+            continue
         if request_id:
             matched = [interview_id for interview_id in interview_ids if interview_id in message]
             explicit_message = message_pattern.search(message)
@@ -408,6 +434,22 @@ def report_direct(args, state):
     """Attribute shared-function logs to test IDs before measuring their overlap."""
     region, bucket = state["region"], state["bucket"]
     start = datetime.fromisoformat(state["submitted_at"])
+    message_ids = None
+    if state.get("mode") == "sqs-existing":
+        if not args.console_log:
+            raise ValueError("SQS reports require --console-log with accepted message IDs from the k6 run")
+        message_ids = {}
+        for line in Path(args.console_log).read_text().splitlines():
+            quoted = re.search(r'\bmsg=("(?:\\.|[^"\\])*")', line)
+            if quoted:
+                try:
+                    record = json.loads(json.loads(quoted.group(1)))
+                    if isinstance(record, dict) and record.get("event") == "submitted":
+                        message_ids[record["message_id"]] = record["interview_id"]
+                except (ValueError, TypeError):
+                    pass
+        if set(message_ids.values()) != set(state["ids"]):
+            raise ValueError("Console log does not contain an accepted SQS message ID for every staged interview")
     s3 = client("s3", region)
     def inspect_interview(interview_id):
         key = f"{interview_id}/{interview_id}.mp4"
@@ -435,17 +477,19 @@ def report_direct(args, state):
             logGroupName=f"/aws/lambda/{state['outputs']['FunctionName']}", startTime=int(start.timestamp() * 1000)):
         events.extend(page.get("events", []))
     # Existing function may also serve real interviews: never count unrelated invocations.
-    intervals, peak, per_interview, selected = attribute_test_invocations(events, state["ids"], state["run_id"])
+    intervals, peak, per_interview, selected = attribute_test_invocations(events, state["ids"], state["run_id"], message_ids)
     save(Path(args.output).with_name("lambda-system-events.json"), selected)
     valid = all(item.get("media_valid") for item in checks)
     one_attempt = all(len(ids) == 1 for ids in per_interview.values()) and len(intervals) == len(state["ids"])
     complete = all(interval["end_ms"] is not None for interval in intervals)
-    result = {"run_id": state["run_id"], "mode": "direct-existing", "target": len(state["ids"]),
-              "status": "PASS" if valid and one_attempt and complete and peak >= len(state["ids"]) else "NOT_PROVEN",
+    expected_peak = state.get("expected_peak", len(state["ids"]))
+    result = {"run_id": state["run_id"], "mode": state["mode"], "target": len(state["ids"]),
+              "expected_peak": expected_peak,
+              "status": "PASS" if valid and one_attempt and complete and peak == expected_peak else "NOT_PROVEN",
               "observed_peak": peak, "checked_at": datetime.now(timezone.utc).isoformat(),
               "interviews": checks, "invocations": intervals,
               "requests_by_interview": {key: sorted(value) for key, value in per_interview.items()},
-              "note": "Encoding-only direct invocations: missing transcript failures are intentional. No SQS scheduling, scoring or done markers are tested. PASS needs --verify and test-attributed Lambda overlap; logs can arrive late."}
+              "note": "Encoding-only test: missing transcript failures are intentional. Scoring and done markers are excluded. PASS needs --verify and test-attributed Lambda overlap matching the configured target; logs can arrive late."}
     save(args.output, result)
     print(json.dumps({key: result[key] for key in ("status", "target", "observed_peak")}, indent=2))
     print(f"Encoded: {sum(item['encoded'] for item in checks)}/{len(checks)}; report: {args.output}")
@@ -468,6 +512,7 @@ def main():
     p.set_defaults(action=fixture)
     p = sub.add_parser("stage", help="WRITE S3: upload fixture and create unique test interview inputs")
     p.add_argument("--existing-function", help="Use an existing Lambda directly, without deployment, queues or transcripts")
+    p.add_argument("--queue-url", help="Send the encoding-only test through this existing queue instead of direct invocations")
     p.add_argument("--stack", default="transcoder-perf-20")
     p.add_argument("--fixture", type=Path, default=Path("performance-tests/results/fixture"))
     p.add_argument("--bucket", default="voicebot-testing")
@@ -484,6 +529,7 @@ def main():
     p.add_argument("--state", type=Path, default=Path("performance-tests/results/run.json"))
     p.add_argument("--verify", action="store_true")
     p.add_argument("--verify-workers", type=int, choices=range(1, 17), default=8)
+    p.add_argument("--console-log", type=Path, help="k6 console output containing SQS submission message IDs")
     p.add_argument("--output", type=Path, default=Path("performance-tests/results/report.json"))
     p.set_defaults(action=report)
     args = parser.parse_args()

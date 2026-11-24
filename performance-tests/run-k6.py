@@ -54,7 +54,8 @@ def main():
             env["AWS_SESSION_TOKEN"] = frozen.token
     extra = args.k6_args[1:] if args.k6_args[:1] == ["--"] else args.k6_args
     state = json.loads(args.state.read_text())
-    script = Path(__file__).with_name("transcoder-direct.k6.js" if state.get("mode") == "direct-existing" else "transcoder.k6.js")
+    scripts = {"direct-existing": "transcoder-direct.k6.js", "sqs-existing": "transcoder-sqs-existing.k6.js"}
+    script = Path(__file__).with_name(scripts.get(state.get("mode"), "transcoder.k6.js"))
     print(f"k6 results: {output}", flush=True)
     result = subprocess.run(["k6", "run", *extra, str(script)], env=env, check=False)
     if not args.dry_run:

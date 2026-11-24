@@ -4,6 +4,30 @@ from transcoder_perf import attribute_test_invocations, invocation_intervals, va
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_warm_worker_delayed_traceback_does_not_mix_interviews(self):
+        first = "11111111-1111-1111-1111-111111111111"
+        second = "22222222-2222-2222-2222-222222222222"
+        messages = [f"START RequestId: {first}",
+                    f"[ERROR]\ttime\t{first}\tFailed to process message msg-one",
+                    f"END RequestId: {first}", f"START RequestId: {second}",
+                    "Delayed traceback: interview_one/transcript.json",
+                    f"[ERROR]\ttime\t{second}\tFailed to process message msg-two",
+                    f"END RequestId: {second}"]
+        events = [{"timestamp": i, "logStreamName": "warm", "message": message} for i, message in enumerate(messages)]
+        _, peak, mapping, _ = attribute_test_invocations(events, ["interview_one", "interview_two"], "run",
+                                                       {"msg-one": "interview_one", "msg-two": "interview_two"})
+        self.assertEqual(mapping, {"interview_one": {first}, "interview_two": {second}})
+        self.assertEqual(peak, 1)
+
+    def test_real_sqs_message_id_maps_to_test_interview(self):
+        events = [{"timestamp": 1, "logStreamName": "test", "message": "START RequestId: actual"},
+                  {"timestamp": 2, "logStreamName": "test", "message": "Failed to process message 1234-abcd"},
+                  {"timestamp": 3, "logStreamName": "test", "message": "END RequestId: actual"}]
+        intervals, peak, mapping, _ = attribute_test_invocations(events, ["interview_test"], "run",
+                                                                {"1234-abcd": "interview_test"})
+        self.assertEqual(mapping["interview_test"], {"actual"})
+        self.assertEqual(peak, 1)
+
     def test_fragmented_error_log_maps_message_id_to_100th_interview(self):
         ids = [f"interview_perftc_test_{i:03d}" for i in range(1, 101)]
         events = [{"timestamp": 1, "logStreamName": "test", "message": "START RequestId: actual"},
