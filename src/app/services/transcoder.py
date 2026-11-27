@@ -3,7 +3,10 @@ import logging
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
+from math import isfinite
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from ..errors import TranscodeError
 from ..repositories.storage_repository import StorageRepository
@@ -20,7 +23,7 @@ JOINED_SIZE_FILTER = (
 )
 
 
-def run_command(command: list[str], timeout: int) -> str:
+def _run_media_tool(command: list[str], timeout: int) -> str:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as error:
@@ -43,30 +46,23 @@ def merge_chunks(
     A byte-level concatenation is valid within one session: the first chunk carries
     the WebM header and the rest continue the same MediaRecorder stream.
     """
-    chunk_dir = work_dir / f"chunks{index}"
-    chunk_dir.mkdir()
-    paths = [chunk_dir / f"{chunk.seq:08d}.webm" for chunk in session.chunks]
-
-    def fetch(pair: tuple[str, Path]) -> None:
-        storage.download_file(bucket, pair[0], str(pair[1]))
-
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        list(pool.map(fetch, [(chunk.key, path) for chunk, path in zip(session.chunks, paths)]))
-
     merged = work_dir / f"session{index}.webm"
-    with merged.open("wb") as output:
-        for path in paths:
-            with path.open("rb") as source:
-                shutil.copyfileobj(source, output)
-            path.unlink()
-    chunk_dir.rmdir()
+    with TemporaryDirectory(dir=work_dir) as chunk_dir:
+        paths = [Path(chunk_dir) / f"{seq:08d}.webm" for seq in range(len(session.chunk_keys))]
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            list(pool.map(storage.download_file, repeat(bucket), session.chunk_keys, map(str, paths)))
+        with merged.open("wb") as output:
+            for path in paths:
+                with path.open("rb") as source:
+                    shutil.copyfileobj(source, output)
+                path.unlink()
     return merged
 
 
 def convert_to_mp4(source: Path, target: Path, size_filter: str, timeout: int) -> None:
     # Browser webm has no duration and a variable frame rate: regenerate timestamps
     # and force a constant frame rate so the MP4 is seekable and clips cut cleanly.
-    run_command(
+    _run_media_tool(
         [
             "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
             "-fflags", "+genpts",
@@ -82,13 +78,13 @@ def convert_to_mp4(source: Path, target: Path, size_filter: str, timeout: int) -
     )
 
 
-def join_mp4s(sources: list[Path], target: Path, work_dir: Path, timeout: int) -> None:
-    list_file = work_dir / "sessions.txt"
-    list_file.write_text("".join(f"file '{source}'\n" for source in sources))
-    run_command(
+def join_mp4s(sources: list[Path], target: Path, timeout: int) -> None:
+    list_file = target.with_name("sessions.txt")
+    list_file.write_text("".join(f"file {source.name}\n" for source in sources), encoding="utf-8")
+    _run_media_tool(
         [
             "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(list_file),
+            "-f", "concat", "-i", str(list_file),
             "-c", "copy", "-movflags", "+faststart",
             str(target),
         ],
@@ -98,7 +94,7 @@ def join_mp4s(sources: list[Path], target: Path, work_dir: Path, timeout: int) -
 
 def verify_output(path: Path, timeout: int) -> float:
     """Return the duration in seconds after checking for a video and an audio stream."""
-    output = run_command(
+    output = _run_media_tool(
         [
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration:stream=codec_type",
@@ -111,7 +107,7 @@ def verify_output(path: Path, timeout: int) -> float:
     if not {"video", "audio"} <= stream_types:
         raise TranscodeError(f"Output has streams {sorted(stream_types)}, expected video and audio")
     duration = float(info.get("format", {}).get("duration") or 0)
-    if duration <= 0:
+    if not isfinite(duration) or duration <= 0:
         raise TranscodeError("Output has no duration")
     return duration
 
@@ -132,14 +128,14 @@ def transcode_sessions(
     for index, session in enumerate(sessions):
         merged = merge_chunks(storage, bucket, session, work_dir, index, concurrency)
         mp4 = work_dir / f"session{index}.mp4"
-        logger.info("Converting session %s (%d chunks) to MP4", session.session_id, len(session.chunks))
+        logger.info("Converting session %s (%d chunks) to MP4", session.session_id, len(session.chunk_keys))
         convert_to_mp4(merged, mp4, size_filter, timeout)
         merged.unlink()
         session_mp4s.append(mp4)
 
     if joined:
         final = work_dir / "interview.mp4"
-        join_mp4s(session_mp4s, final, work_dir, timeout)
+        join_mp4s(session_mp4s, final, timeout)
     else:
         final = session_mp4s[0]
 

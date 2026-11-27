@@ -1,20 +1,15 @@
-from abc import ABC, abstractmethod
+import json
 
 
-class QueueRepository(ABC):
-    @abstractmethod
-    def send_message(self, queue_url: str, body: str, group_id: str, dedup_id: str) -> None:
-        """Send a message to a FIFO queue."""
+class ScoringQueue:
+    def __init__(self, client: object, queue_url: str):
+        self._client = client
+        self._queue_url = queue_url
 
-
-class SqsRepository(QueueRepository):
-    def __init__(self, client: object):
-        self.sqs = client
-
-    def send_message(self, queue_url: str, body: str, group_id: str, dedup_id: str) -> None:
-        self.sqs.send_message(
-            QueueUrl=queue_url,
-            MessageBody=body,
-            MessageGroupId=group_id,
-            MessageDeduplicationId=dedup_id,
+    def request_scoring(self, interview_id: str) -> None:
+        self._client.send_message(
+            QueueUrl=self._queue_url,
+            MessageBody=json.dumps({"interview_id": interview_id}),
+            MessageGroupId=f"messageGroup_{interview_id}",
+            MessageDeduplicationId=f"messageId_{interview_id}",
         )

@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 import tempfile
@@ -7,7 +6,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..errors import InvalidInterviewId, TranscodeError, TranscriptNotReady
-from ..repositories.queue_repository import QueueRepository
+from ..repositories.queue_repository import ScoringQueue
 from ..repositories.storage_repository import StorageRepository
 from .manifest import find_sessions
 from .transcoder import transcode_sessions
@@ -15,17 +14,17 @@ from .transcoder import transcode_sessions
 logger = logging.getLogger(__name__)
 
 # Same format the scoring lambda accepts.
-INTERVIEW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+INTERVIEW_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class TranscodePipeline:
-    def __init__(self, settings: Settings, storage: StorageRepository, queue: QueueRepository):
+    def __init__(self, settings: Settings, storage: StorageRepository, queue: ScoringQueue):
         self.settings = settings
         self.storage = storage
         self.queue = queue
 
     def process_interview(self, interview_id: str) -> None:
-        if not isinstance(interview_id, str) or not INTERVIEW_ID_PATTERN.match(interview_id):
+        if not isinstance(interview_id, str) or not INTERVIEW_ID_PATTERN.fullmatch(interview_id):
             raise InvalidInterviewId(f"Invalid interview_id: {interview_id!r}")
 
         settings = self.settings
@@ -38,7 +37,7 @@ class TranscodePipeline:
             return
 
         mp4_size = self.storage.head(settings.output_bucket, mp4_key)
-        if mp4_size is None:
+        if not mp4_size:
             mp4_size = self.build_mp4(interview_id, mp4_key)
         else:
             logger.info("interview_id=%s MP4 already exists, skipping transcode", interview_id)
@@ -46,12 +45,7 @@ class TranscodePipeline:
         if self.storage.head(settings.output_bucket, transcript_key) is None:
             raise TranscriptNotReady(f"{transcript_key} is not in {settings.output_bucket} yet")
 
-        self.queue.send_message(
-            settings.scoring_queue_url,
-            json.dumps({"interview_id": interview_id}),
-            group_id=f"messageGroup_{interview_id}",
-            dedup_id=f"messageId_{interview_id}",
-        )
+        self.queue.request_scoring(interview_id)
         logger.info("interview_id=%s scoring message sent", interview_id)
 
         self.storage.put_json_if_absent(
@@ -86,4 +80,4 @@ class TranscodePipeline:
         if remote_size != local_size:
             raise TranscodeError(f"Uploaded MP4 is {remote_size} bytes, expected {local_size}")
         logger.info("interview_id=%s uploaded %s (%d bytes)", interview_id, mp4_key, remote_size)
-        return remote_size
+        return local_size

@@ -37,3 +37,5 @@ class Settings:
         ]
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+        if self.download_concurrency < 1 or self.ffmpeg_timeout_seconds < 1:
+            raise ValueError("DOWNLOAD_CONCURRENCY and FFMPEG_TIMEOUT_SECONDS must be positive")

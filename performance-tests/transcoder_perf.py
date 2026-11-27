@@ -19,14 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 
-def save(path, value):
-    path = Path(path)
+def write_artifact(path: Path, value: dict | list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, default=str) + "\n")
-
-
-def read(path):
-    return json.loads(Path(path).read_text())
 
 
 def client(service, region):
@@ -71,7 +66,7 @@ def plan(args):
             sqs = client("sqs", args.region)
             url = sqs.get_queue_url(QueueName=arn[-1], QueueOwnerAWSAccountId=arn[4])["QueueUrl"]
             snapshot["queues"].append(sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["All"])["Attributes"])
-    save(args.output / "deployment-snapshot.json", snapshot)
+    write_artifact(args.output / "deployment-snapshot.json", snapshot)
     ref = lambda name: {"Ref": name}
     att = lambda name, field: {"Fn::GetAtt": [name, field]}
     sub = lambda value: {"Fn::Sub": value}
@@ -123,7 +118,7 @@ def plan(args):
                     "FunctionName": {"Value": ref("Function")}, "QueueUrl": {"Value": ref("InputQueue")},
                     "TriggerUUID": {"Value": ref("Trigger")},
                     "ScoringSinkUrl": {"Value": ref("ScoringSink")}, "DeadLetterUrl": {"Value": ref("DeadLetters")}}}
-    save(args.output / "stack.json", template)
+    write_artifact(args.output / "stack.json", template)
     print(json.dumps({"snapshot": str(args.output / "deployment-snapshot.json"),
                       "template": str(args.output / "stack.json"), "image": image}, indent=2))
 
@@ -163,7 +158,7 @@ def fixture(args):
             path.write_bytes(source.read(length))
             chunks.append({"seq": seq, "size": length, "file": path.name,
                            "startMs": seq * 5000, "endMs": min((seq + 1) * 5000, args.seconds * 1000)})
-    save(metadata_path, {"source_id": args.source_id, "duration_seconds": args.seconds,
+    write_artifact(metadata_path, {"source_id": args.source_id, "duration_seconds": args.seconds,
                          "bytes": size, "probe": info, "chunks": chunks,
                          "method": "looped real VP8/Opus media; equal-byte splits, not browser-timed chunks"})
     print(json.dumps({"fixture": str(metadata_path), "bytes": size, "chunks": count,
@@ -181,9 +176,11 @@ def stage(args):
     if args.state.exists():
         raise ValueError("State file exists; choose a new --state path to preserve the earlier run")
     direct = bool(args.existing_function)
-    queue_url = getattr(args, "queue_url", None)
+    queue_url = args.queue_url
     if queue_url and not direct:
         raise ValueError("--queue-url requires --existing-function")
+    if queue_url and args.count != 100:
+        raise ValueError("--queue-url requires --count 100")
     if not direct and args.count > 20:
         raise ValueError("The isolated stack is capped at 20; use --existing-function for the 100-way direct test")
     outputs = {"FunctionName": args.existing_function} if direct else stack_outputs(args)
@@ -202,7 +199,7 @@ def stage(args):
         if cfg["Environment"]["Variables"][key] != args.bucket:
             raise ValueError("Staging bucket differs from the test function's configured buckets")
     s3 = client("s3", args.region)
-    fixture_meta = read(args.fixture / "fixture.json")
+    fixture_meta = json.loads((args.fixture / "fixture.json").read_text())
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + uuid.uuid4().hex[:6]
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,60}", run_id):
         raise ValueError("Invalid run ID")
@@ -214,7 +211,7 @@ def stage(args):
              "mode": "sqs-existing" if queue_url else "direct-existing" if direct else "isolated-sqs",
              "expected_peak": expected_peak,
              "run_id": run_id, "ids": ids, "fixture": fixture_meta, "staged": False}
-    save(args.state, state)
+    write_artifact(args.state, state)
     fixture_prefix = f"{root}fixture/"
     def upload(chunk):
         s3.upload_file(str(args.fixture / "chunks" / chunk["file"]), args.bucket,
@@ -246,10 +243,10 @@ def stage(args):
     with ThreadPoolExecutor(max_workers=args.stage_concurrency) as pool:
         list(pool.map(stage_interview, ids))
     state["staged"] = True
-    save(args.state, state)
+    write_artifact(args.state, state)
 
 
-def exists(s3, bucket, key):
+def head_output(s3, bucket, key):
     from botocore.exceptions import ClientError
     try:
         return s3.head_object(Bucket=bucket, Key=key)
@@ -260,7 +257,7 @@ def exists(s3, bucket, key):
 
 
 def run(args):
-    state = read(args.state)
+    state = json.loads(args.state.read_text())
     if not state.get("staged") or state.get("submitted_at"):
         raise ValueError("Use a fully staged, fresh run; never resubmit an existing test")
     s3 = client("s3", state["region"])
@@ -281,10 +278,10 @@ def run(args):
     if any(int(attrs.get(k, 0)) for k in ("ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed")):
         raise ValueError("Test queue is not empty")
     for interview_id in state["ids"]:
-        if any(exists(s3, state["bucket"], f"{interview_id}/{key}") for key in (f"{interview_id}.mp4", "transcode_done.json")):
+        if any(head_output(s3, state["bucket"], f"{interview_id}/{key}") for key in (f"{interview_id}.mp4", "transcode_done.json")):
             raise ValueError(f"{interview_id} already has output; this would skip encoding")
     state["submitted_at"] = datetime.now(timezone.utc).isoformat()
-    save(args.state, state)
+    write_artifact(args.state, state)
     def send(interview_id):
         result = sqs.send_message(QueueUrl=state["outputs"]["QueueUrl"],
                                  MessageBody=json.dumps({"interview_id": interview_id}),
@@ -293,7 +290,7 @@ def run(args):
     with ThreadPoolExecutor(max_workers=len(state["ids"])) as pool:
         state["messages"] = list(pool.map(send, state["ids"]))
     state["submission_finished_at"] = datetime.now(timezone.utc).isoformat()
-    save(args.state, state)
+    write_artifact(args.state, state)
     print(f"Submitted {len(state['ids'])} interviews; use report to poll and verify.")
 
 
@@ -322,41 +319,56 @@ def invocation_intervals(events):
     return intervals, peak
 
 
+def verify_mp4(s3, bucket, key, expected_duration, timeout=120):
+    url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=900)
+    try:
+        info = probe(url, timeout=timeout)
+        return {
+            "duration_seconds": validate_probe(info, expected_duration),
+            "streams": [
+                {field: stream.get(field) for field in ("codec_type", "codec_name", "width", "height")}
+                for stream in info["streams"]
+            ],
+            "media_valid": True,
+        }
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        return {"media_valid": False, "validation_error": type(error).__name__}
+
+
+def lambda_log_events(region, function_name, start):
+    pages = client("logs", region).get_paginator("filter_log_events").paginate(
+        logGroupName=f"/aws/lambda/{function_name}", startTime=int(start.timestamp() * 1000)
+    )
+    return [event for page in pages for event in page.get("events", [])]
+
+
 def report(args):
-    state = read(args.state)
+    state = json.loads(args.state.read_text())
     if not state.get("submitted_at"):
         raise ValueError("Run has not been submitted")
     if state.get("mode") in ("direct-existing", "sqs-existing"):
         return report_direct(args, state)
+
+    from app.repositories.s3_repository import S3Repository
+
     region, bucket = state["region"], state["bucket"]
     s3, sqs = client("s3", region), client("sqs", region)
+    storage = S3Repository(s3)
     start = datetime.fromisoformat(state["submitted_at"])
     checks = []
     for interview_id in state["ids"]:
-        marker = exists(s3, bucket, f"{interview_id}/transcode_done.json")
-        mp4 = exists(s3, bucket, f"{interview_id}/{interview_id}.mp4")
+        marker_key = f"{interview_id}/transcode_done.json"
+        mp4_key = f"{interview_id}/{interview_id}.mp4"
+        marker = head_output(s3, bucket, marker_key)
+        mp4 = head_output(s3, bucket, mp4_key)
         item = {"interview_id": interview_id, "done": bool(marker), "mp4_bytes": mp4["ContentLength"] if mp4 else None}
         if marker:
-            done = json.loads(s3.get_object(Bucket=bucket, Key=f"{interview_id}/transcode_done.json")["Body"].read())
+            done = storage.read_json(bucket, marker_key)
             item["completion_seconds"] = (datetime.fromisoformat(done["completed_at"]) - start).total_seconds()
         if mp4 and args.verify:
-            url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": f"{interview_id}/{interview_id}.mp4"}, ExpiresIn=900)
-            # Keep signed URLs out of exception messages and reports.
-            try:
-                info = probe(url)
-                item["duration_seconds"] = validate_probe(info, state["fixture"]["duration_seconds"])
-                item["streams"] = [{k: s.get(k) for k in ("codec_type", "codec_name", "width", "height")} for s in info["streams"]]
-                item["media_valid"] = True
-            except Exception as error:
-                item["media_valid"] = False
-                item["validation_error"] = type(error).__name__
+            item.update(verify_mp4(s3, bucket, mp4_key, state["fixture"]["duration_seconds"]))
         checks.append(item)
-    events = []
-    logs = client("logs", region)
-    for page in logs.get_paginator("filter_log_events").paginate(
-            logGroupName=f"/aws/lambda/{state['outputs']['FunctionName']}", startTime=int(start.timestamp() * 1000)):
-        events.extend(page.get("events", []))
-    intervals, peak = invocation_intervals(events)
+    intervals, peak = invocation_intervals(lambda_log_events(region, state["outputs"]["FunctionName"], start))
     queues = {k: sqs.get_queue_attributes(QueueUrl=state["outputs"][k], AttributeNames=["All"])["Attributes"]
               for k in ("QueueUrl", "ScoringSinkUrl", "DeadLetterUrl")}
     metrics = {}
@@ -385,7 +397,7 @@ def report(args):
                   "p95": sorted(durations)[math.ceil(len(durations) * .95) - 1]} if durations else None,
               "max_memory_used_mb": max(memory) if memory else None,
               "note": "PASS requires --verify, all outputs, observed overlap, no extra attempts and an empty DLQ. Logs/metrics can arrive late. Lambda Errors alone misses handled per-item failures."}
-    save(args.output, result)
+    write_artifact(args.output, result)
     print(json.dumps({k: result[k] for k in ("status", "target", "observed_peak")}, indent=2))
     print(f"Completed: {sum(x['done'] for x in checks)}/{len(checks)}; report: {args.output}")
 
@@ -453,32 +465,20 @@ def report_direct(args, state):
     s3 = client("s3", region)
     def inspect_interview(interview_id):
         key = f"{interview_id}/{interview_id}.mp4"
-        mp4 = exists(s3, bucket, key)
+        mp4 = head_output(s3, bucket, key)
         item = {"interview_id": interview_id, "encoded": bool(mp4),
                 "mp4_bytes": mp4["ContentLength"] if mp4 else None}
         if mp4:
             item["completion_seconds"] = (mp4["LastModified"] - start).total_seconds()
         if mp4 and args.verify:
-            url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=900)
-            try:
-                info = probe(url, timeout=30)
-                item["duration_seconds"] = validate_probe(info, state["fixture"]["duration_seconds"])
-                item["streams"] = [{key: stream.get(key) for key in ("codec_type", "codec_name", "width", "height")}
-                                   for stream in info["streams"]]
-                item["media_valid"] = True
-            except Exception as error:
-                item["media_valid"] = False
-                item["validation_error"] = type(error).__name__
+            item.update(verify_mp4(s3, bucket, key, state["fixture"]["duration_seconds"], timeout=30))
         return item
     with ThreadPoolExecutor(max_workers=args.verify_workers) as pool:
         checks = list(pool.map(inspect_interview, state["ids"]))
-    events = []
-    for page in client("logs", region).get_paginator("filter_log_events").paginate(
-            logGroupName=f"/aws/lambda/{state['outputs']['FunctionName']}", startTime=int(start.timestamp() * 1000)):
-        events.extend(page.get("events", []))
+    events = lambda_log_events(region, state["outputs"]["FunctionName"], start)
     # Existing function may also serve real interviews: never count unrelated invocations.
     intervals, peak, per_interview, selected = attribute_test_invocations(events, state["ids"], state["run_id"], message_ids)
-    save(Path(args.output).with_name("lambda-system-events.json"), selected)
+    write_artifact(args.output.with_name("lambda-system-events.json"), selected)
     valid = all(item.get("media_valid") for item in checks)
     one_attempt = all(len(ids) == 1 for ids in per_interview.values()) and len(intervals) == len(state["ids"])
     complete = all(interval["end_ms"] is not None for interval in intervals)
@@ -490,7 +490,7 @@ def report_direct(args, state):
               "interviews": checks, "invocations": intervals,
               "requests_by_interview": {key: sorted(value) for key, value in per_interview.items()},
               "note": "Encoding-only test: missing transcript failures are intentional. Scoring and done markers are excluded. PASS needs --verify and test-attributed Lambda overlap matching the configured target; logs can arrive late."}
-    save(args.output, result)
+    write_artifact(args.output, result)
     print(json.dumps({key: result[key] for key in ("status", "target", "observed_peak")}, indent=2))
     print(f"Encoded: {sum(item['encoded'] for item in checks)}/{len(checks)}; report: {args.output}")
 

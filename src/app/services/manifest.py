@@ -7,26 +7,19 @@ from ..repositories.storage_repository import StorageRepository
 
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 1
-CHUNK_PATTERN = re.compile(r"chunk_(\d{8})\.webm$")
+CHUNK_PATTERN = re.compile(r"chunk_([0-9]{8})\.webm")
 USABLE_STATUSES = {"complete", "interrupted"}
 UNFINISHED_STATUSES = {"recording", "incomplete"}
-
-
-@dataclass(frozen=True)
-class ChunkInfo:
-    seq: int
-    key: str
-    size: int
 
 
 @dataclass(frozen=True)
 class RecordingSession:
     session_id: str
     started_at: float
-    chunks: tuple[ChunkInfo, ...]
+    chunk_keys: tuple[str, ...]
 
 
-def started_at_seconds(value: object) -> float:
+def _started_at_seconds(value: object) -> float:
     """Epoch seconds from an ISO string or an epoch value in seconds or milliseconds."""
     if isinstance(value, (int, float)):
         return value / 1000 if value > 1e11 else float(value)
@@ -44,13 +37,14 @@ def started_at_seconds(value: object) -> float:
 def find_sessions(storage: StorageRepository, bucket: str, interview_id: str) -> list[RecordingSession]:
     """Return the validated recording sessions of an interview, oldest first."""
     root = f"{interview_id}/recording_chunks/"
-    objects = storage.list_objects(bucket, root)
-
     session_ids = []
-    for key in objects:
-        parts = key[len(root):].split("/")
-        if len(parts) == 2 and parts[1] == MANIFEST_NAME:
-            session_ids.append(parts[0])
+    uploads: dict[str, dict[int, int]] = {}
+    for key, size in storage.list_objects(bucket, root).items():
+        session_id, _, name = key[len(root):].partition("/")
+        if name == MANIFEST_NAME:
+            session_ids.append(session_id)
+        elif match := CHUNK_PATTERN.fullmatch(name):
+            uploads.setdefault(session_id, {})[int(match[1])] = size
     if not session_ids:
         raise RecordingNotReady(f"No recording manifest found under {root}")
 
@@ -58,7 +52,7 @@ def find_sessions(storage: StorageRepository, bucket: str, interview_id: str) ->
     for session_id in sorted(session_ids):
         prefix = f"{root}{session_id}/"
         manifest = storage.read_json(bucket, f"{prefix}{MANIFEST_NAME}")
-        session = validate_session(session_id, prefix, manifest, objects)
+        session = _validate_session(session_id, prefix, manifest, uploads.get(session_id, {}))
         if session is not None:
             sessions.append(session)
     if not sessions:
@@ -67,8 +61,8 @@ def find_sessions(storage: StorageRepository, bucket: str, interview_id: str) ->
     return sessions
 
 
-def validate_session(
-    session_id: str, prefix: str, manifest: dict, objects: dict[str, int]
+def _validate_session(
+    session_id: str, prefix: str, manifest: dict, uploaded_sizes: dict[int, int]
 ) -> RecordingSession | None:
     """Validate one session's manifest against the uploaded chunks. None means no chunks were recorded."""
     if manifest.get("version") != MANIFEST_VERSION:
@@ -82,31 +76,24 @@ def validate_session(
     if manifest.get("missingSequences"):
         raise RecordingNotReady(f"Session {session_id}: missing chunks {manifest['missingSequences']}")
 
-    entries = manifest.get("chunks") or []
-    if not entries:
-        return None
-
     manifest_sizes: dict[int, int] = {}
-    for entry in entries:
+    for entry in manifest.get("chunks") or []:
         seq = int(entry["seq"])
         if seq in manifest_sizes:
             raise InvalidRecording(f"Session {session_id}: duplicate chunk seq {seq}")
         manifest_sizes[seq] = int(entry["size"])
-    if sorted(manifest_sizes) != list(range(len(manifest_sizes))):
+    if not manifest_sizes:
+        return None
+
+    sequences = range(len(manifest_sizes))
+    if sorted(manifest_sizes) != list(sequences):
         raise RecordingNotReady(f"Session {session_id}: chunk sequence is not contiguous from 0")
 
-    uploaded_sizes: dict[int, int] = {}
-    for key, size in objects.items():
-        if key.startswith(prefix):
-            match = CHUNK_PATTERN.search(key[len(prefix):])
-            if match:
-                uploaded_sizes[int(match.group(1))] = size
-    stale = sorted(set(uploaded_sizes) - set(manifest_sizes))
+    stale = sorted(uploaded_sizes.keys() - manifest_sizes.keys())
     if stale:
         raise RecordingNotReady(f"Session {session_id}: chunks {stale} are uploaded but not in the manifest")
 
-    chunks = []
-    for seq in sorted(manifest_sizes):
+    for seq in sequences:
         size = uploaded_sizes.get(seq)
         if size is None:
             raise RecordingNotReady(f"Session {session_id}: chunk {seq} is not uploaded")
@@ -114,14 +101,13 @@ def validate_session(
             raise RecordingNotReady(
                 f"Session {session_id}: chunk {seq} is {size} bytes, manifest says {manifest_sizes[seq]}"
             )
-        chunks.append(ChunkInfo(seq=seq, key=f"{prefix}chunk_{seq:08d}.webm", size=size))
 
     total_bytes = manifest.get("totalBytes")
-    if total_bytes is not None and int(total_bytes) != sum(chunk.size for chunk in chunks):
+    if total_bytes is not None and int(total_bytes) != sum(manifest_sizes.values()):
         raise RecordingNotReady(f"Session {session_id}: totalBytes does not match the chunk sizes")
 
     return RecordingSession(
         session_id=session_id,
-        started_at=started_at_seconds(manifest.get("startedAt")),
-        chunks=tuple(chunks),
+        started_at=_started_at_seconds(manifest.get("startedAt")),
+        chunk_keys=tuple(f"{prefix}chunk_{seq:08d}.webm" for seq in sequences),
     )

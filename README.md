@@ -1,114 +1,49 @@
 # Conversational recording transcoder
 
-SQS-triggered Lambda (container image). After the browser has uploaded its 5-second WebM chunks, it turns them into the single MP4 that `conversational-ai-lambda-processing` expects and then triggers scoring.
+An SQS-triggered Lambda that converts browser-recorded WebM chunks to MP4 and requests scoring from `conversational-ai-lambda-processing`.
 
-## Flow
+## Processing
 
-For each `{"interview_id": ...}` message on the transcoder queue:
+The input message body is `{"interview_id":"<id>"}`. For each interview, the Lambda:
 
-1. Skip if `{interview_id}/transcode_done.json` exists in `AWS_BUCKET_NAME`.
-2. If `{interview_id}/{interview_id}.mp4` does not exist yet:
-   - List `{interview_id}/recording_chunks/` in `CVI_RECORDING_BUCKET_NAME` and validate every session's `manifest.json` (status, contiguous `seq`, chunk sizes against S3, no stale chunks).
-   - Per session, download the chunks in order and byte-concatenate them into one webm, then convert it to H.264/AAC MP4 with ffmpeg (constant frame rate, `+faststart`).
-   - With several sessions (camera swap or restart), each is normalized to 1280x720 and joined with the ffmpeg concat demuxer.
-   - Check the result with ffprobe (video and audio stream, duration > 0), upload it to `{interview_id}/{interview_id}.mp4` in `AWS_BUCKET_NAME` and confirm the size.
-3. Require `{interview_id}/transcript.json` in `AWS_BUCKET_NAME`. If it is missing the message fails and returns to the queue.
-4. Send `{"interview_id": ...}` to the scoring FIFO queue (`SCORING_QUEUE_URL`) with `MessageGroupId=messageGroup_{id}` and `MessageDeduplicationId=messageId_{id}`, the same values the web app uses.
-5. Write the `transcode_done.json` marker with a conditional put.
+1. Checks for `{id}/transcode_done.json` in the output bucket and skips completed interviews.
+2. When a nonempty `{id}/{id}.mp4` is unavailable, validates the session manifests and chunk sizes under `{id}/recording_chunks/` in the recording bucket. FFmpeg encodes H.264 video and AAC audio. It processes multiple sessions in start-time order and joins them at 1280×720. The Lambda checks the output with ffprobe and verifies its size after upload.
+3. Waits for `{id}/transcript.json` in the output bucket. If it is missing, SQS can retry the record and reuse the uploaded MP4.
+4. Sends `{"interview_id":"<id>"}` to the scoring FIFO queue with group ID `messageGroup_{id}` and deduplication ID `messageId_{id}`. It then writes the completion marker with a conditional S3 put.
 
-Failures are returned as `batchItemFailures`, so SQS retries them and moves them to the dead-letter queue after the redrive limit. Enable `ReportBatchItemFailures` on the event source mapping. Unfinished or inconsistent uploads (`RecordingNotReady`) and a missing transcript (`TranscriptNotReady`) are retried the same way.
+Enable `ReportBatchItemFailures` on the Lambda event source mapping and configure a dead-letter queue. Standard batches continue after an item fails. FIFO batches stop at the first failure and return the remaining items for retry. [AWS SQS batch error handling](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html)
 
 ## Configuration
 
-| Variable | Purpose |
-|---|---|
-| `CVI_RECORDING_BUCKET_NAME` | Bucket with the recording chunks and manifests |
-| `AWS_BUCKET_NAME` | Bucket with `transcript.json`; the MP4 and marker are written here |
-| `SCORING_QUEUE_URL` | FIFO queue that triggers the scoring lambda |
-| `SCRATCH_DIR`, `FFMPEG_TIMEOUT_SECONDS`, `DOWNLOAD_CONCURRENCY` | Optional tuning (`/tmp`, 780, 8) |
+| Environment variable | Purpose |
+| --- | --- |
+| `CVI_RECORDING_BUCKET_NAME` | S3 bucket containing the manifests and WebM chunks |
+| `AWS_BUCKET_NAME` | S3 bucket containing the transcript, MP4, and completion marker |
+| `SCORING_QUEUE_URL` | Scoring FIFO queue URL |
+| `AWS_REGION` | AWS region. Falls back to `AWS_DEFAULT_REGION`, then `ap-southeast-1` |
+| `SCRATCH_DIR` | Writable working directory, defaults to `/tmp` |
+| `FFMPEG_TIMEOUT_SECONDS` | Timeout per FFmpeg or ffprobe command, defaults to 780 seconds |
+| `DOWNLOAD_CONCURRENCY` | Chunk download workers per session, defaults to 8 |
 
-Lambda needs: `s3:ListBucket` and `s3:GetObject` on the recording bucket; `s3:GetObject` and `s3:PutObject` on the output bucket (`s3:ListBucket` too, so a missing key reads as 404 rather than 403); `sqs:SendMessage` on the scoring queue. Size it with up to 10 GB ephemeral storage, a 15 minute timeout and several GB of memory. Set the transcoder queue's visibility timeout to at least the function timeout and give it a dead-letter queue.
+The Lambda role needs `s3:ListBucket` and `s3:GetObject` on the recording bucket, `s3:ListBucket`, `s3:GetObject`, and `s3:PutObject` on the output bucket, and `sqs:SendMessage` on the scoring queue. Size Lambda memory, timeout, and ephemeral storage for the largest recordings.
 
-## Structure
-
-```text
-src/app/
-  config.py                      # Environment configuration
-  clients.py                     # Shared boto3 client config
-  errors.py                      # Retriable and permanent failure types
-  handler.py                     # Lambda entrypoint (SQS event)
-  main.py                        # Local startup check; wires the S3 client
-  repositories/
-    storage_repository.py        # Storage interface
-    s3_repository.py             # S3 implementation, injected AWS client
-    queue_repository.py          # Queue interface and SQS implementation
-  services/
-    manifest.py                  # Find and validate recording sessions
-    transcoder.py                # Chunk concat, ffmpeg conversion, ffprobe check
-    pipeline.py                  # Idempotent end-to-end flow for one interview
-```
-
-AWS SDK calls live in the repository layer. Application code depends on the storage interface. Credentials use boto3's default credential chain: local profiles, environment variables, or an IAM role.
-
-## Run locally
-
-`docker compose run` starts the startup check (`app.main`). The image's own entrypoint is the Lambda runtime client, running `app.handler.lambda_handler`.
+## Local startup and regression tests
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 docker compose build --builder default
 docker compose run --rm conversational-recording-transcoder
-```
-
-Compose mounts the host's `~/.aws` directory read-only and uses UID/GID 1000 so local profiles remain readable. Set `LOCAL_UID` and `LOCAL_GID` for a different host user. For SSO profiles, run `aws sso login --profile <profile>` on the host first and set `AWS_PROFILE` in `.env`.
-
-Alternatively, supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` in `.env`. Credentials are never copied into the image. For deployment on AWS, use the task's IAM role and omit the local credentials mount.
-
-The local startup check creates the configured S3 client, injects it into `S3Repository`, and prints `status: initialized`. AWS credentials follow the SDK's standard credential chain. It makes no S3 requests and does not verify permissions.
-
-## Push an image to ECR
-
-From the project directory, run:
-
-```bash
-./scripts/push_to_ecr.sh
-# Optional version tag and AWS profile:
-AWS_PROFILE=your-profile ./scripts/push_to_ecr.sh v1
-```
-
-The script builds and pushes to
-`826961393531.dkr.ecr.ap-southeast-1.amazonaws.com/conversational-media-transcoder:latest`
-by default. It checks the AWS account and that the repository exists before building.
-Every run pulls the base image and rebuilds with `--no-cache`, so unchanged source
-does not simply reuse the previous build. After publishing, it prints the digest
-and push timestamp reported by ECR.
-It uses a single `linux/amd64` platform, the Docker exporter, and disables provenance
-and SBOM attestations. It explicitly uses `docker push --platform` to publish only
-the selected platform's image manifest, excluding an image index. This requires
-Docker API 1.46 or newer. After pushing, it checks that ECR reports a Docker v2 image
-manifest (`application/vnd.docker.distribution.manifest.v2+json`), rather than an
-image index. The script exits with an error if verification fails.
-
-For an ARM Lambda, use `TARGET_PLATFORM=linux/arm64`. The image architecture must
-match the Lambda function. Other overrides are `AWS_REGION`, `AWS_ACCOUNT_ID`, and
-`ECR_REPOSITORY`; see `./scripts/push_to_ecr.sh --help`. AWS credentials follow the
-CLI's normal credential chain. The script publishes the image only; updating the
-Lambda function is a separate step.
-
-## Verify FFmpeg
-
-```bash
-docker compose run --rm --entrypoint ffmpeg conversational-recording-transcoder -version
-```
-
-## Tests
-
-For Grafana k6 tests of up to 100 concurrent one-hour recordings on the existing
-Lambda, see [performance-tests/K6.md](performance-tests/K6.md).
-
-```bash
 docker compose run --rm --entrypoint python \
   -v "$PWD/tests:/app/tests:ro" conversational-recording-transcoder -m unittest discover -s tests -v
+python3 -m unittest discover -s performance-tests -v
 ```
 
-Tests verify the startup check makes no S3 requests and that no bucket configuration is needed to load settings.
+Compose runs the S3 client startup check using the standard AWS credential chain. For an SSO profile, run `aws sso login --profile <profile>` on the host and set `AWS_PROFILE` in `.env`. Compose mounts the host AWS config read-only. Set `LOCAL_UID` and `LOCAL_GID` if the host credentials are owned by a user other than UID/GID 1000.
+
+The regression suite uses local WebM fixtures, real FFmpeg and ffprobe, and mocked AWS calls. It covers single- and multi-session output, transcript retries, completion markers, and SQS batch handling.
+
+## Image publishing and load testing
+
+`./scripts/push_to_ecr.sh [tag]` builds and publishes a single-platform image to ECR and verifies its manifest. The Lambda image runs `app.handler.lambda_handler`. Use `./scripts/push_to_ecr.sh --help` for configuration.
+
+The [k6 runbook](performance-tests/K6.md) covers offline checks and load tests for an existing Lambda. The [isolated-stack runbook](performance-tests/README.md) covers load tests with a dedicated scoring sink.

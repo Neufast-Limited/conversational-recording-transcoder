@@ -14,7 +14,7 @@ class PerformanceGuardTests(unittest.TestCase):
         pipeline.build_mp4 = Mock()
         pipeline.process_interview("interview_perftc_guard_001")
         pipeline.build_mp4.assert_not_called()
-        queue.send_message.assert_not_called()
+        queue.request_scoring.assert_not_called()
         storage.head.assert_called_once_with("test", "interview_perftc_guard_001/transcode_done.json")
 
     def test_missing_transcript_allows_encoding_but_prevents_scoring(self):
@@ -25,7 +25,7 @@ class PerformanceGuardTests(unittest.TestCase):
         with self.assertRaises(TranscriptNotReady):
             pipeline.process_interview("perf_tc_guard_001")
         pipeline.build_mp4.assert_called_once_with("perf_tc_guard_001", "perf_tc_guard_001/perf_tc_guard_001.mp4")
-        queue.send_message.assert_not_called()
+        queue.request_scoring.assert_not_called()
         storage.put_json_if_absent.assert_not_called()
 
 
