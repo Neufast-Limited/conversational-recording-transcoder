@@ -1,0 +1,36 @@
+{
+  "staged": true,
+  "region": "ap-southeast-1",
+  "bucket": "voicebot-testing",
+  "stack": "transcoder-perf-20",
+  "run_id": "offline",
+  "ids": [
+    "interview_perftc_offline_001",
+    "interview_perftc_offline_002",
+    "interview_perftc_offline_003",
+    "interview_perftc_offline_004",
+    "interview_perftc_offline_005",
+    "interview_perftc_offline_006",
+    "interview_perftc_offline_007",
+    "interview_perftc_offline_008",
+    "interview_perftc_offline_009",
+    "interview_perftc_offline_010",
+    "interview_perftc_offline_011",
+    "interview_perftc_offline_012",
+    "interview_perftc_offline_013",
+    "interview_perftc_offline_014",
+    "interview_perftc_offline_015",
+    "interview_perftc_offline_016",
+    "interview_perftc_offline_017",
+    "interview_perftc_offline_018",
+    "interview_perftc_offline_019",
+    "interview_perftc_offline_020"
+  ],
+  "outputs": {
+    "FunctionName": "conversational-media-transcoder"
+  },
+  "fixture": {
+    "duration_seconds": 3600
+  },
+  "mode": "direct-existing"
+}

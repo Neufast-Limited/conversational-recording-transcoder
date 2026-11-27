@@ -1,45 +1,49 @@
-# Conversational recording transcoder baseline
+# Conversational recording transcoder
 
-Minimal Python starter: FFmpeg is installed in Docker and an AWS S3 client is initialized through the repository layer. Startup performs no S3 operations and exits after initialization.
+An SQS-triggered Lambda that converts browser-recorded WebM chunks to MP4 and requests scoring from `conversational-ai-lambda-processing`.
 
-## Structure
+## Processing
 
-```text
-src/app/
-  config.py                      # Environment configuration
-  main.py                        # Entrypoint; wires dependencies
-  repositories/
-    storage_repository.py        # Storage interface
-    s3_repository.py             # S3 implementation, injected AWS client
-```
+The input message body is `{"interview_id":"<id>"}`. For each interview, the Lambda:
 
-AWS SDK calls live in the repository layer. Application code depends on the storage interface. Credentials use boto3's default credential chain: local profiles, environment variables, or an IAM role.
+1. Checks for `{id}/transcode_done.json` in the output bucket and skips completed interviews.
+2. When a nonempty `{id}/{id}.mp4` is unavailable, validates the session manifests and chunk sizes under `{id}/recording_chunks/` in the recording bucket. FFmpeg encodes H.264 video and AAC audio. It processes multiple sessions in start-time order and joins them at 1280×720. The Lambda checks the output with ffprobe and verifies its size after upload.
+3. Waits for `{id}/transcript.json` in the output bucket. If it is missing, SQS can retry the record and reuse the uploaded MP4.
+4. Sends `{"interview_id":"<id>"}` to the scoring FIFO queue with group ID `messageGroup_{id}` and deduplication ID `messageId_{id}`. It then writes the completion marker with a conditional S3 put.
 
-## Run
+Enable `ReportBatchItemFailures` on the Lambda event source mapping and configure a dead-letter queue. Standard batches continue after an item fails. FIFO batches stop at the first failure and return the remaining items for retry. [AWS SQS batch error handling](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html)
+
+## Configuration
+
+| Environment variable | Purpose |
+| --- | --- |
+| `CVI_RECORDING_BUCKET_NAME` | S3 bucket containing the manifests and WebM chunks |
+| `AWS_BUCKET_NAME` | S3 bucket containing the transcript, MP4, and completion marker |
+| `SCORING_QUEUE_URL` | Scoring FIFO queue URL |
+| `AWS_REGION` | AWS region. Falls back to `AWS_DEFAULT_REGION`, then `ap-southeast-1` |
+| `SCRATCH_DIR` | Writable working directory, defaults to `/tmp` |
+| `FFMPEG_TIMEOUT_SECONDS` | Timeout per FFmpeg or ffprobe command, defaults to 780 seconds |
+| `DOWNLOAD_CONCURRENCY` | Chunk download workers per session, defaults to 8 |
+
+The Lambda role needs `s3:ListBucket` and `s3:GetObject` on the recording bucket, `s3:ListBucket`, `s3:GetObject`, and `s3:PutObject` on the output bucket, and `sqs:SendMessage` on the scoring queue. Size Lambda memory, timeout, and ephemeral storage for the largest recordings.
+
+## Local startup and regression tests
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 docker compose build --builder default
 docker compose run --rm conversational-recording-transcoder
-```
-
-Compose mounts the host's `~/.aws` directory read-only and uses UID/GID 1000 so local profiles remain readable. Set `LOCAL_UID` and `LOCAL_GID` for a different host user. For SSO profiles, run `aws sso login --profile <profile>` on the host first and set `AWS_PROFILE` in `.env`.
-
-Alternatively, supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` in `.env`. Credentials are never copied into the image. For deployment on AWS, use the task's IAM role and omit the local credentials mount.
-
-Startup creates the configured S3 client, injects it into `S3Repository`, and prints `status: initialized`. AWS credentials follow the SDK's standard credential chain. No bucket is required and no bucket access check, listing, upload, download, or transcoding runs. Client initialization does not verify AWS permissions; those will be checked when future operations are implemented.
-
-## Verify FFmpeg
-
-```bash
-docker compose run --rm --entrypoint ffmpeg conversational-recording-transcoder -version
-```
-
-## Tests
-
-```bash
 docker compose run --rm --entrypoint python \
   -v "$PWD/tests:/app/tests:ro" conversational-recording-transcoder -m unittest discover -s tests -v
+python3 -m unittest discover -s performance-tests -v
 ```
 
-Tests verify startup makes no S3 requests and requires no bucket configuration.
+Compose runs the S3 client startup check using the standard AWS credential chain. For an SSO profile, run `aws sso login --profile <profile>` on the host and set `AWS_PROFILE` in `.env`. Compose mounts the host AWS config read-only. Set `LOCAL_UID` and `LOCAL_GID` if the host credentials are owned by a user other than UID/GID 1000.
+
+The regression suite uses local WebM fixtures, real FFmpeg and ffprobe, and mocked AWS calls. It covers single- and multi-session output, transcript retries, completion markers, and SQS batch handling.
+
+## Image publishing and load testing
+
+`./scripts/push_to_ecr.sh [tag]` builds and publishes a single-platform image to ECR and verifies its manifest. The Lambda image runs `app.handler.lambda_handler`. Use `./scripts/push_to_ecr.sh --help` for configuration.
+
+The [k6 runbook](performance-tests/K6.md) covers offline checks and load tests for an existing Lambda. The [isolated-stack runbook](performance-tests/README.md) covers load tests with a dedicated scoring sink.

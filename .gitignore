@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .env
+performance-tests/results/*
+!performance-tests/results/TRANSCODER_20X_1HR_REPORT.md
+!performance-tests/results/TRANSCODER_100X_1HR_REPORT.md

@@ -1,0 +1,71 @@
+[
+  {
+    "service": "sqs",
+    "method": "POST",
+    "host": "sqs.ap-southeast-1.amazonaws.com",
+    "path": "/",
+    "body": "{\"QueueUrl\":\"https://sqs.ap-southeast-1.amazonaws.com/123456789012/test.fifo\",\"MessageBody\":\"{\\\"interview_id\\\":\\\"perf_tc_test_001\\\"}\"}",
+    "region": "ap-southeast-1",
+    "credentials": {
+      "key": "PERFEXAMPLEKEY",
+      "secret": "fake-secret-only-for-offline-signature-tests",
+      "token": "fake-session-token",
+      "action": "SendMessage"
+    },
+    "now": "2026-11-21T06:00:00Z",
+    "expected_authorization": "AWS4-HMAC-SHA256 Credential=PERFEXAMPLEKEY/20261121/ap-southeast-1/sqs/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-amz-target, Signature=a622ff5906e132b0908525efec9a579b2281e34f85ae67e638d50a6742435f32"
+  },
+  {
+    "service": "lambda",
+    "method": "GET",
+    "host": "lambda.ap-southeast-1.amazonaws.com",
+    "path": "/2015-03-31/functions/transcoder-perf-20/configuration",
+    "body": "",
+    "region": "ap-southeast-1",
+    "credentials": {
+      "key": "PERFEXAMPLEKEY",
+      "secret": "fake-secret-only-for-offline-signature-tests",
+      "token": "fake-session-token",
+      "action": "SendMessage"
+    },
+    "now": "2026-11-21T06:00:00Z",
+    "expected_authorization": "AWS4-HMAC-SHA256 Credential=PERFEXAMPLEKEY/20261121/ap-southeast-1/lambda/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=ef0a0caab5b5009dbbe7196cc7555d6e8321ecc889ee03ebae56930ff90b2bf7"
+  },
+  {
+    "service": "s3",
+    "method": "HEAD",
+    "host": "voicebot-testing.s3.ap-southeast-1.amazonaws.com",
+    "path": "/perf_tc_test_001/perf_tc_test_001.mp4",
+    "body": "",
+    "region": "ap-southeast-1",
+    "credentials": {
+      "key": "PERFEXAMPLEKEY",
+      "secret": "fake-secret-only-for-offline-signature-tests",
+      "token": "fake-session-token",
+      "action": "SendMessage"
+    },
+    "now": "2026-11-21T06:00:00Z",
+    "expected_authorization": "AWS4-HMAC-SHA256 Credential=PERFEXAMPLEKEY/20261121/ap-southeast-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=0a85f7403ba52de77309bb7db4c8ae8e8d4b382c11875c23e51dda44ca0314dc"
+  },
+  {
+    "service": "lambda",
+    "method": "POST",
+    "host": "lambda.ap-southeast-1.amazonaws.com",
+    "path": "/2015-03-31/functions/conversational-media-transcoder/invocations",
+    "body": "{\"Records\":[]}",
+    "region": "ap-southeast-1",
+    "credentials": {
+      "key": "PERFEXAMPLEKEY",
+      "secret": "fake-secret-only-for-offline-signature-tests",
+      "token": "fake-session-token",
+      "action": "SendMessage"
+    },
+    "now": "2026-11-21T06:00:00Z",
+    "expected_authorization": "AWS4-HMAC-SHA256 Credential=PERFEXAMPLEKEY/20261121/ap-southeast-1/lambda/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-invocation-type;x-amz-log-type;x-amz-security-token, Signature=53a20e87a039c04f92406adbd6d5f2f59f3cc76270af30ea7658434cb38fc9d9",
+    "extra_headers": {
+      "content-type": "application/json",
+      "x-amz-invocation-type": "RequestResponse",
+      "x-amz-log-type": "Tail"
+    }
+  }
+]
